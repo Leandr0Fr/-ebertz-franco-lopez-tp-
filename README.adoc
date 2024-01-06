@@ -1,0 +1,228 @@
+= Trabajo Práctico - Bases de Datos I
+Gonzalo López <gonzagonzalopez20@gmail.com>; Leandro Franco <leandro00fr@gmail.com>; Ximena Ebertz <ebertz.xime@gmail.com>
+v1, {docdate}. Docentes Hernán Rondelli y Daniel Bertaccini
+:toc:
+:toc-title: Secciones
+:numbered:
+:source-highlighter: coderay
+:tabsize: 4
+:nofooter:
+
+== Introducción
+
+El trabajo práctico consiste en dos bases de datos, una SQL y otra NoSQL, las cuales se utilizan mediante una CLI escrita en GO.
+
+La base de datos SQL permite generar, cancelar y asignar turnos, manteniendo toda la información de los pacientes y controlando que los turnos sean asignados correctamente.
+
+Para reservar un turno, le paciente debe estar registrado y no debe tener 5 turnos en estado reservado. Le médique elegide debe existir en la base de datos, y debe tener un turno disponible para la fecha y hora solicitada.
+
+Cada turno es asignado al paciente en la fecha y hora elegida, en el centro medico donde se encuentra le médique seleccionado. Si le paciente tiene obra social, se almacena la información de la obra social y los montos a abonar por la obra social y por le paciente.
+
+Además, se lleva un registro de les pacientes atendides en el mes. Esta información se utiliza para administrar las liquidaciones mensuales de las atenciones realizadas por cada médique.
+Se garantiza que ninguna modificación en la base de datos quede a medio hacer, es decir, se garantiza que toda la información se almacena de forma segura o no se almacena, y que, en caso de un problema, no queda información inconsistente.
+
+Mientras que la NoSQL permite almacenar y leer los datos de mediques, pacientes, consultorios, obras sociales y turnos médicos.
+
+== Descripción
+
+La base de datos SQL contiene los siguientes Stored Procedures y Triggers:
+
+- `generar_turnos_disponibles(anio int, mes int)` Genera todos los turnos disponibles para el mes en el año ingresado como parámetro. Si se pueden generar todos los turnos correctamente, devuelve `true`. Si no, devuelve `false`.
+No se generan los turnos en caso de que exista un turno en el mes solicitado.
+Para generar los turnos, se utiliza un loop que genera todas las fechas del mes. Por cada fecha, se obtiene su día de la semana en el mes elegido, y esa información es utilizada para obtener de la tabla `agenda` a les médiques que atienden ese día y sus horarios de atención. Luego, por cada registro, se generan todos los turnos posibles para le médique en su horario de atención. 
+Estos turnos se almacenan en la tabla `turno`, con estado `disponible`.
+
+- `reservar_turno(nro_historia_clinica int, dni_medique_pedide int, fecha_pedida date, hora_pedida time)` Recibe los datos de la reserva y devuelve `true` si se logra reservar el turno ó `false` en caso contrario. Si se aprueba la reserva, actualiza la fila correspondiente en la tabla `turno` con los datos del paciente y los montos de la consulta a abonar por elle y por la obra social, marcando el estado como `reservado`.
+El Stored Procedure valida los siguientes elementos antes de confirmar la reserva:
+
+  * Valida que el DNI del médique exista en la tabla `medique`. En caso de que no cumpla, se cargan los datos del turno en la tabla `error` con el motivo `?dni de médique no válido.`
+
+  * Valida que el número de historia clínica (número de paciente) exista en la tabla `paciente`. En caso de que no cumpla, se cargan los datos del turno en la tabla `error` con el motivo `?nro de historia clínica no válido.`
+
+  * Si le paciente tiene una obra social, valida que en la tabla `cobertura` le médique trabaje con esa obra social. En caso de que no cumpla, se cargan los datos del turno en la tabla `error` con el motivo `?obra social de paciente no atendida por le médique.`
+
+  * Valida que en la tabla `turno` exista el turno de le médique para la fecha y la hora solicitadas, y que su estado sea `disponible`. En caso de que no cumpla, se cargan los datos del turno en la tabla `error` con el motivo `?turno inexistente ó no disponible.`
+
+  * Valida que en la tabla `turno` le paciente no haya llegado al límite de 5 turnos con estado `reservado`. En caso de que no cumpla, se cargan los datos del turno en la tabla `error` con el motivo `supera límite de reserva de turnos.`
+
+- `cancelar_turnos(dni_medique_pedide int, fecha_desde timestamp, fecha_hasta timestamp)` Actualiza la tabla `turno` con el estado `cancelado` cambiando todos los turnos disponibles ó reservados de un médique para un rango de fechas, de modo que las tuplas quedan actualizadas. Recibe como parámetros el DNI del médique, la fecha de inicio y la fecha final del rango. Cancela los turnos y retorna la cantidad de turnos cancelados. Además, se envían los datos del turno a la tabla `reprogramacion` con el estado `desistido.`
+
+- `atender_paciente(num_turno int)` Recibe un número de turno y actualiza la tupla seleccionada de la tabla `turno` con el estado `atendido`. Retorna `true` en caso de que se realize correctamente ó `false` en caso contrario. El Stored Procedure verífica los siguientes casos para realizar correctamente la acción:
+
+  * Verifica que el número exista en la tabla `turno`. En caso de que no se cumpla, se carga en la tabla `error` los datos del turno junto al motivo `?nro de turno no válido.`
+
+  * Verifica que la tupla seleccionada tenga el estado `reservado`. En caso de que no se cumpla, se carga en la tabla `error` los datos del turno junto al motivo `?turno no reservado.`
+
+  * Verifica que la tupla seleccionada sea la fecha actual, sin importar la hora. En caso de que no se cumpla, se carga en la tabla `error` los datos del turno junto al motivo `?turno no corresponde a la fecha del día.`
+
+- `liquidar_obras_sociales(anio int, mes int)` Genera una liquidación por obra social, cargando en la tabla `liquidacion_cabecera` el monto total que será percibido por la atención de les afiliades, y el detalle de todas las atenciones en la tabla `liquidacion_detalle`. Sólo son abonados les pacientes que tienen al menos un turno con estado `atendido`. Cada turno incluido en la liquidación es actualizado en la tabla `turno`, cambiando su estado a `liquidado`.
+
+- `enviar_email_reserva_o_cancelacion()` Cuando se actualiza la tabla `turno`, si se trata de una reserva o cancelación, se genera un email a le paciente con los datos del turno y de le médique elegide; y su asunto es `Reserva de turno` o `Cancelación de turno`. Este email se almacena en la tabla `envio_email.`
+
+- `generar_avisos_perdida_de_turnos()` Genera un email dando aviso de la pérdida de su turno para les pacientes que tenían un turno en estado `reservado` para la fecha actual y no concurrieron al mismo. Este email se almacena en la tabla `envio_email`, y su asunto es `Pérdida de turno reservado`.
+
+- `generar_recordatorios()` Genera emails para recordar el turno a los pacientes con turnos para dos días después de la fecha actual, en estado `reservado`. Este email se almacena en la tabla `envio_email`, con asunto `Recordatorio de turno`.
+
+=== Problemas encontrados
+
+* Las tablas `error`, `envio_mail`, `turno` y `liquidacion_cabecera` tienen en común una columna que cuenta el órden de que se inserta una nueva tupla, o sea, es un contador de tuplas. Estas columnas tienen el tipo de dato `int`. Para automatizar el proceso, y no crear una función para cada tabla que cuente el órden de la nueva tupla, se cambio el tipo de dato a `serial`.
+Este tipo de dato realiza el conteo de la nuevas tuplas automáticamente. Al insertar una nueva tupla, se coloca el parámetro `default`, para que lo cuente automáticamente.
+
+* En los archivos de go se repetia en diferentes sitios el código de conexión hacía la base de datos. Para solucionar este problema optamos por abrir la conexión con la base de datos una única vez y pasar por parámetro `db` en las funciones que utilizaban este.
+
+* Navegando por las opciones del menú, la terminal mantenia el print del menú anterior. No quedaba claro en que menú estaba el usuario. Se solucionó creando la función `limpiarPantalla()`, que ejecuta el comando `clear` y limpia la terminal para el nuevo print del menú.
+
+* Tuvimos problemas al establecer el isolation level de una transacción desde *app-sql.go*, si la transacción es un stored procedure que recibe parámetros. Para solucionar esto, definimos dos funciones: `setearIsolationLevel(db *sql.DB, isolationLevel string)` y `commitTransaccion(db *sql.DB)`, llamadas desde cada función de `go` que requería un diferente nivel de isolation level para el stored procedure utilizado. Como en el contexto del TP no trabajamos con datos reales, si no que trabajamos con datos "hardcodeados", decidimos no utilizar estas funciones en el menú del programa.
+Entonces, desde el menú del programa se llama a funciones con los datos seteados para poder testear la aplicación. Sin embargo, esto no quiere decir que no se pueda establecer el isolation level de una transacción desde `go`; ya que encontramos una forma de hacerlo utilizando `context`. La solución encontrada no fue implementada ya que no era necesaria para este contexto, pero dejamos las funciones no utilizadas en el menú para mostrar cómo se trabajaría con datos reales en el sistema.
+
+=== CLI
+
+Ejecutando el archivo *app-sql.go* se inicializa el sistema que permite utilizar la base de datos SQL.
+
+La interfaz se divide en 2 secciones: menú principal y menú de acciones.
+
+- *Menú principal:* En esta sección se puede cargar los datos de las tablas, cargar las PK's, cargar las FK's, borras las PK's y FK's, cargar las Stored Procedures y Triggers, acceder al menú de acciones y salir del programa.
+
+- *Menú de acciones:* En esta sección se pueden realizar las Stored Procedures de la base de datos: Generar turnos, Reservar turno, Cancelar turnos, Atender turno, Liquidar obras sociales, Generar emails de recordatorios, Generar emails sobre turnos perdidos y volver al menú principal. 
+
+Ejecutando el archivo *app-boltdb.go* se inicializa el sistema que permite utilizar la base de datos NoSQL.
+
+La interfaz contiene un único menú. En este menú se puede crear la base de datos, cargar los datos, ver los datos de la base de datos y salir del programa.
+
+== Implementación
+
+Con el fin de mejorar la legibilidad y la estructura del código, decidimos dividirlo en diferentes archivos .sql. Esta práctica nos permitió una mejor organización de las consultas SQL, Stored Procedures y Triggers. Además de facilitar el mantenimiento y la colaboración en el proyecto.
+A continuación se muestran los archivos mencionados, exponiendo las funcionalidades que contienen:
+
+.Creación de tablas
+[source, sql]
+----
+include::sql-files/create-tables.sql[lines=1..134]
+----
+
+.Creación de PK's
+[source, sql]
+----
+include::sql-files/add-primary-keys.sql[lines=1..16]
+----
+
+.Creación de FK's
+[source, sql]
+----
+include::sql-files/add-foreign-keys.sql[lines=1..22]
+----
+
+.Eliminación de PK's y FK's
+[source, sql]
+----
+include::sql-files/drop-keys.sql[lines=1..36]
+----
+
+.Carga de datos
+[source, sql]
+----
+include::sql-files/add-data.sql[lines=1..114]
+----
+
+.Generación de turnos
+[source, sql]
+----
+include::sql-files/generacion-de-turnos.sql[lines=1..31]
+----
+
+Recibe como parámetros un año y un mes, de tipo de `int`. Retorna un valor booleano.
+Se verifica si ya existe un turno para el mes y año especificados.
+Si es así, retorna `false`. En caso contrario, itera sobre los días del mes,
+y para cada día, selecciona las tuplas de la tabla `agenda` que coincidan
+con el día de la semana de esa fecha. Luego, se generan los turnos
+disponibles en base a los horarios obtenidos de la tabla `agenda`.
+Los nuevos turnos se insertan en la tabla `turnos` obteniendo los datos de la tabla `agenda` y el estado `disponible`. Al finalizar la iteración, retorna `true`.
+
+.Reserva de turno
+[source, sql]
+----
+include::sql-files/reserva-de-turnos.sql[lines=1..74]
+----
+
+Recibe como parámetros a `nro_historia_clinica int, dni_medico_pedido int, fecha_pedida date, hora_pedida time`. Retorna un booleano.
+Verifica que `nro_historia_clinica` exista, verifica que `dni_medico_pedido` sea válido,
+verifica que la obra social del paciente sea compatible con el médico y verifica si existe el turno o no está disponible.
+En caso de que alguna verificación no se cumpla, se carga en la tabla `error` los datos del turno con el motivo de error correspondiente.
+En caso de que todos los parámetros sean correctos, entonces el turno será aprobado y actualizará el estado del turno a `reservado`.
+
+.Cancelación de turnos
+[source, sql]
+----
+include::sql-files/cancelacion-de-turnos.sql[lines=1..32]
+----
+
+Recibe como parámetros DNI del médico, la fecha de inicio y la fecha de fin. Retorna la cantidad de turnos cancelados.
+
+Dentro de un bucle, busca en la tabla `turno` las tuplas donde `dni_medique` coincida con el DNI del médico proporcionado
+y el estado del turno sea `disponible` o `reservado`. Además, se verifica que la fecha del turno esté dentro del rango especificado por las fechas de inicio y fin.
+Para los tuplas que cumplen con estas condiciones, se actualiza el estado del turno a `cancelado`.
+Luego, se registra la cancelación en la tabla `reprogramacion` mediante la función `reprogramar`,
+donde se almacenan los detalles del turno cancelado, como el número de turno, el nombre y apellido del paciente, el nombre y apellido del médico, y el estado `desistido`.
+Finalmente, la Stored Procedure cuenta la cantidad de turnos cancelados y la retorna.
+
+.Atención de turno
+[source, sql]
+----
+include::sql-files/atencion-de-turno.sql[lines=1..38]
+----
+
+Recibe un parámetro llamado `num_turno` de tipo `int`, que representa el número de turno del paciente a atender. Retorna un valor booleano.
+
+Si el número de turno no existe, se inserta en la tabla `error`, con el código de error y se retorna `false`.
+Se verifican algunas condiciones: se verifica si el estado del turno es "reservado" y si la fecha del turno es la fecha actual. Si alguna de estas condiciones no se cumple,
+se inserta en la tabla `error`, con el código de error correspondiente y se retorna `false`.
+Si todas las verificaciones son exitosas, se actualiza el estado del turno a `atendido` y se retorna `true`.
+
+.Liquidación para obras sociales
+[source, sql]
+----
+include::sql-files/liquidacion-obras-sociales.sql[lines=1..32]
+----
+
+Toma como parámetros el año y mes, de tipo `int`, para los cuales se desea realizar la liquidación de las obras sociales.
+La función no devuelve ningún valor (`void`).
+
+Recorre las tuplas de la tabla `turno` que cumplen el período indicado y tenga el estado `atendido`, obteniendo los `nro_obra_social_consulta` y la 'sum(monto_obra_social) monto_final asociados a cada tupla.
+Luego, inserta en la tabla `liquidacion_cabecera` la información reducida de la liquidación. Tras esto, actualiza el turno con el estado `liquidado`.
+Finalmente, itera las tuplas generadas anteriormente insertadas en la tabla `liquidacion_cabecera`, se obtienen los datos del paciente y los médique involucrado en la liquidación de las tablas
+`paciente` y `medique` respectivamente. Estos datos se suman a la tupla de `liquidacion_cabecera`, insertandolos en la tabla `liquidación_detalle`.
+
+.Generación de emails
+[source, sql]
+----
+include::sql-files/generar-emails.sql[lines=1..78]
+----
+
+`enviar_email_reserva_o_cancelacion` es un Trigger que se ejecuta después de una actualización en la tabla `turno.
+Toma como entrada el `estado` actualizado del turno y tiene como objetivo enviar un correo electrónico al paciente relacionado
+con el turno en caso de que el `estado` no sea "reservado" o "cancelado".
+En caso de que el `estado` sea `reservado`, se establece un asunto y cuerpo del email para indicar que se ha realizado una reserva de turno.
+En caso de que el `estado` sea `cancelado`, se establecen el asunto y cuerpo del email para indicar que se ha cancelado un turno.
+Luego, se inserta una nueva entrada en la tabla `envio_email` con la información del email a enviar.
+
+`generar_recordatorios` se encarga de generar recordatorios de turnos reservados.
+Itera las tuplas de la tabla `turno` que tienen un `estado` de `reservado`
+y cuya `fecha` es dos días antes de la fecha actual.
+Se obtiene el email del paciente asociado al turno y se crea el cuerpo del email
+con la información del turno.
+Finalmente, se inserta en la tabla `envio_email` con la información del email a enviar con el `estado` pendiente.
+
+`generar_avisos_perdida_de_turnos` se encarga de generar avisos de pérdida de turnos reservados.
+Itera las tuplas de la tabla `turno` que tienen un `estado` de `reservado` y cuya fecha coincide con la fecha actual.
+Se obtiene el email del paciente asociado al turno y se crea el cuerpo del correo con la información del turno.
+Finalmente, se inserta en la tabla `envio_email` con la información del email a enviar con el `estado` pendiente.
+
+== Conclusiones
+
+Tras el desarrollo del trabajo práctico, hemos reconocido la importancia de consultar la documentación oficial de las tecnologías utilizadas en el sistema.
+Notamos lo valiosa que fue esta documentación para solucionar los problemas que surgieron durante el proceso de desarrollo, 
+en comparación con intentar encontrar soluciones en otros lugares que no resultaron ser tan efectivas o adecuadas.
+
+Al utilizar el lenguaje de programación `go`, nos encontramos con algunas características interesantes, como su facilidad de conexión con una base de datos, su sintaxis amigable y el uso de guiones bajos; y con algunas otras no tan interesantes, como la gestión de errores y el uso de mayúsculas para "cosas" públicas. Nos pareció un buen lenguaje de programación para seguir investigando.
+
+Al haber utilizado las bases de datos PostgreSQL y BoltDB notamos las grandes diferencias que hay entre estas. PostgreSQL es una base de datos relacional que utiliza tablas y filas para almacenar datos, con la cual podemos realizar consultas SQL complejas y muy útiles. Por otro lado, BoltDB es una base de datos clave-valor sin una estructura tabular ni un esquema fijo, la cual no utiliza SQL.
